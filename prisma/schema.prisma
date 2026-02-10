@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -11,4 +5,437 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum Pilar {
+  FINANCIACION
+  CAPACIDAD
+  FISICO
+  RELACIONES
+}
+
+/// Recurrencia de un evento. NONE = evento único.
+enum Recurrence {
+  NONE
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum TaskStatus {
+  POR_HACER
+  EN_PROGRESO
+  EN_REVISION
+  COMPLETADO
+}
+
+enum Priority {
+  ALTA
+  MEDIA
+  BAJA
+}
+
+/// Intensidad de una recaída en el escudo de dopamina.
+enum Intensity {
+  LEVE
+  MODERADA
+  FUERTE
+}
+
+/// Nivel de energía para métricas de Capacidad.
+enum EnergyLevel {
+  ALTO
+  MEDIO
+  BAJO
+}
+
+/// Calidad de las interacciones para métricas de Relaciones.
+enum RelationshipQuality {
+  PROFUNDA
+  NORMAL
+  SUPERFICIAL
+}
+
+/// Tipo de entrada en el historial (qué originó la XP).
+enum HistoryEntryType {
+  EVENT
+  OBJECTIVE
+  DOPAMINE
+  METRIC
+}
+
+// ============================================================================
+// AUTH — NextAuth necesita estos campos en User + Account + Session
+// ============================================================================
+
+model User {
+  id             String    @id @default(cuid())
+  name           String?
+  email          String    @unique
+  emailVerified  DateTime?
+  image          String?
+  hashedPassword String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // NextAuth relations
+  accounts Account[]
+  sessions Session[]
+
+  // App relations
+  pilarProgresses PilarProgress[]
+  events          Event[]
+  objectives      Objective[]
+  dopamineShields DopamineShield[]
+  historyEntries  HistoryEntry[]
+  pilarMetrics    PilarMetric[]
+  calendarEvents  CalendarEvent[]
+  kanbanBoards    KanbanBoard[]
+}
+
+/// NextAuth — proveedores OAuth (no usamos ahora pero el adapter lo necesita).
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+/// NextAuth — sesiones activas.
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// NextAuth — tokens de verificación (magic link, etc.)
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================================================
+// PILARES Y XP
+// ============================================================================
+
+/// Progreso de XP y nivel por pilar. Siempre hay exactamente 4 registros por user.
+model PilarProgress {
+  id      String @id @default(cuid())
+  userId  String
+  pilar   Pilar
+  level   Int    @default(1)
+  totalXP Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Un user solo tiene un registro por pilar
+  @@unique([userId, pilar])
+  @@index([userId])
+}
+
+// ============================================================================
+// EVENTOS
+// ============================================================================
+
+/// Evento asociado a un pilar. Puede ser único o recurrente.
+/// Si es recurrente, las completaciones se trackean en EventCompletion.
+/// Si es único (recurrence=NONE), se usa el campo `completed` directamente.
+model Event {
+  id          String     @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  pilar       Pilar
+  recurrence  Recurrence @default(NONE)
+  date        DateTime
+  time        String? // HH:mm format — string porque no necesitamos operaciones de tiempo
+  xp          Int        @default(10)
+  completed   Boolean    @default(false) // Solo para eventos no recurrentes
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // Soft delete
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  completions EventCompletion[]
+
+  @@index([userId, pilar])
+  @@index([userId, date])
+}
+
+/// Registro de completado para eventos recurrentes.
+/// Cada vez que se marca "hecho" en una fecha, se crea un registro.
+/// Desmarcar = eliminar el registro de esa fecha.
+model EventCompletion {
+  id      String   @id @default(cuid())
+  eventId String
+  date    DateTime // Fecha en que se completó
+
+  createdAt DateTime @default(now())
+
+  event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  // Un evento solo puede completarse una vez por fecha
+  @@unique([eventId, date])
+  @@index([eventId])
+}
+
+// ============================================================================
+// OBJETIVOS
+// ============================================================================
+
+/// Objetivo a largo plazo asociado a un pilar.
+/// A diferencia de los eventos, no se repiten — se completan una vez.
+model Objective {
+  id          String    @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  pilar       Pilar
+  deadline    DateTime? // Fecha límite opcional
+  xp          Int       @default(25)
+  milestone   Boolean   @default(false) // "Hito importante" — se muestra con estilo especial
+  completed   Boolean   @default(false)
+  progress    Int       @default(0) // 0-100 porcentaje
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // Soft delete
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, pilar])
+}
+
+// ============================================================================
+// ESCUDO DE DOPAMINA
+// ============================================================================
+
+/// Un vicio del que Franco quiere alejarse.
+/// Acumula XP por cada día limpio (progresivamente más).
+/// Recaída = pierde TODA la XP acumulada y resetea el contador.
+model DopamineShield {
+  id            String  @id @default(cuid())
+  userId        String
+  title         String
+  description   String? // Motivación para dejarlo
+  pilar         Pilar // Pilar al que afecta la XP
+  xpPerDay      Int     @default(50) // XP base por día limpio
+  startDate     DateTime @default(now()) // Fecha del último reset (o inicio)
+  maxStreak     Int     @default(0) // Racha máxima histórica en días
+  notifications Boolean @default(false) // Toggle para notificaciones diarias (futuro n8n)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // Soft delete
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  relapses DopamineRelapse[]
+
+  @@index([userId])
+}
+
+/// Registro de una recaída. Se guarda para el historial y stats.
+model DopamineRelapse {
+  id         String    @id @default(cuid())
+  shieldId   String
+  date       DateTime  @default(now())
+  xpLost     Int // XP total que se perdió
+  reflection String? // Reflexión opcional post-recaída
+  intensity  Intensity
+
+  createdAt DateTime @default(now())
+
+  shield DopamineShield @relation(fields: [shieldId], references: [id], onDelete: Cascade)
+
+  @@index([shieldId])
+}
+
+// ============================================================================
+// HISTORIAL
+// ============================================================================
+
+/// Entrada unificada del historial. Cada acción que genera/quita XP
+/// crea una entrada acá. Es el log cronológico de toda la actividad.
+///
+/// referenceId es polimórfico — apunta al ID del evento, objetivo, vicio, etc.
+/// Elegimos polimórfico porque el historial muestra TODO mezclado y
+/// necesitamos queries como "últimas 20 entradas de cualquier tipo".
+model HistoryEntry {
+  id          String           @id @default(cuid())
+  userId      String
+  pilar       Pilar
+  sourceType  HistoryEntryType
+  referenceId String // ID del evento/objetivo/vicio que generó esta entrada
+  xp          Int // Puede ser negativo (recaída)
+  title       String
+  date        DateTime         @default(now())
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
+  @@index([userId, pilar])
+}
+
+// ============================================================================
+// MÉTRICAS POR PILAR
+// ============================================================================
+
+/// Métricas diarias por pilar. Cada pilar usa campos diferentes:
+/// - Financiación: ingresos, gastos, ahorro
+/// - Capacidad: horasConcentrado, horasNoConcentrado, energyLevel
+/// - Físico: peso, horasSueno, entrenamientoHoy
+/// - Relaciones: interaccionesSociales, calidad, notas
+///
+/// ¿Por qué una tabla con campos opcionales en vez de una tabla por pilar?
+/// Porque el dashboard y el historial necesitan agregar datos de todos los
+/// pilares en una sola query. Una tabla unificada simplifica enormemente esto.
+model PilarMetric {
+  id     String @id @default(cuid())
+  userId String
+  pilar  Pilar
+  date   DateTime @db.Date // Solo fecha, sin hora
+
+  // Financiación
+  ingresos Float?
+  gastos   Float?
+  ahorro   Float?
+
+  // Capacidad
+  horasConcentrado    Float?
+  horasNoConcentrado  Float?
+  energyLevel         EnergyLevel?
+
+  // Físico
+  peso             Float?
+  horasSueno       Float?
+  entrenamientoHoy Boolean?
+
+  // Relaciones
+  interaccionesSociales Int?
+  calidad               RelationshipQuality?
+  notas                 String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Una métrica por pilar por día
+  @@unique([userId, pilar, date])
+  @@index([userId, pilar])
+}
+
+// ============================================================================
+// CALENDARIO
+// ============================================================================
+
+/// Evento de calendario. Separado de Event porque tiene semántica diferente:
+/// - Tiene hora inicio/fin (los eventos de pilar tienen solo una hora)
+/// - El pilar es opcional (no todo en el calendario es de un pilar)
+/// - Tiene notas adicionales
+model CalendarEvent {
+  id          String  @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  pilar       Pilar? // Opcional — no todo es de un pilar
+  date        DateTime @db.Date
+  startTime   String? // HH:mm
+  endTime     String? // HH:mm
+  notes       String?
+  xp          Int     @default(0)
+  completed   Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, date])
+}
+
+// ============================================================================
+// KANBAN
+// ============================================================================
+
+/// Tablero kanban. Un usuario puede tener múltiples tableros.
+model KanbanBoard {
+  id          String  @id @default(cuid())
+  userId      String
+  title       String
+  description String?
+  color       String  @default("#3b82f6") // Color del tablero (hex)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  columns KanbanColumn[]
+
+  @@index([userId])
+}
+
+/// Columna dentro de un tablero kanban. Tiene orden para drag & drop.
+model KanbanColumn {
+  id      String @id @default(cuid())
+  boardId String
+  title   String
+  order   Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  board KanbanBoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  tasks KanbanTask[]
+
+  @@index([boardId])
+}
+
+/// Tarea dentro de una columna kanban.
+model KanbanTask {
+  id          String     @id @default(cuid())
+  columnId    String
+  title       String
+  description String?
+  pilar       Pilar? // Opcional — no toda tarea es de un pilar
+  status      TaskStatus @default(POR_HACER)
+  deadline    DateTime?
+  priority    Priority   @default(MEDIA)
+  xp          Int        @default(10)
+  order       Int        @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  column KanbanColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@index([columnId, order])
 }
