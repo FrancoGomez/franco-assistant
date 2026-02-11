@@ -8,12 +8,49 @@
  * a un Client Component y usarlo dentro del Server Component.
  *
  * SessionProvider: da acceso a useSession() en cualquier client component.
- * QueryClientProvider: vendrá en el Paso 4 cuando agreguemos TanStack Query.
+ * QueryClientProvider: TanStack Query para caché, revalidación, y estados de fetch.
+ * TooltipProvider: necesario para que los tooltips de Radix funcionen globalmente.
+ * Toaster: componente de sonner que renderiza las notificaciones toast.
  */
 "use client";
 
+import { useState } from "react";
 import { SessionProvider } from "next-auth/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
 
+/**
+ * ¿Por qué useState para QueryClient?
+ * En React 18+, los componentes se pueden re-renderizar sin desmontarse.
+ * Si creamos el QueryClient fuera del componente o con useMemo, podríamos
+ * compartir caché entre requests en SSR (data leak entre usuarios).
+ * useState garantiza un QueryClient por instancia del componente.
+ *
+ * staleTime: 60s → los datos se consideran "frescos" por 1 minuto.
+ * Evita refetches innecesarios cuando navegás entre páginas.
+ */
 export function Providers({ children }: { children: React.ReactNode }) {
-  return <SessionProvider>{children}</SessionProvider>;
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 60 * 1000,
+            refetchOnWindowFocus: false,
+          },
+        },
+      })
+  );
+
+  return (
+    <SessionProvider>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          {children}
+          <Toaster />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </SessionProvider>
+  );
 }
